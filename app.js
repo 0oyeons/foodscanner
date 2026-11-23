@@ -1,7 +1,8 @@
 /* =========================================================
  * app.js — 알레르기 성분 스캐너 (주기능)
  *  1. 내 알레르기 설정 (저장 / 불러오기)
- *  2. 사진 → 글자 (OCR, Tesseract.js)
+ *  2. 사진 → 글자 (OCR, Tesseract.js): 원재료 부분 고르기 → 흑백·대비 → 글자 인식,
+ *     신뢰도가 낮으면 이진화해서 다시 읽고, 그래도 낮으면 '안전' 대신 '확인 필요'
  *  3. 성분 분석 (추론: 규칙 기반 키워드 사전, dictionary.js)
  *     R1 사전 단어 찾기 · R2 긴 단어 먼저 · R3 제외어 · R4 혼입 문장은 확인 필요
  *     R5 괄호 원료 · R6 띄어쓰기 허용 · R7 가장 높은 등급으로 판정
@@ -82,9 +83,25 @@ function parseCustomWords(raw) {
 
 /* ---------------------------------------------------------
  * 2. 사진 → 글자 (OCR)
+ *   ① 사진을 올리면 원재료명 부분을 손가락으로 끌어서 고른다
+ *   ② 고른 부분만 잘라 키우고, 흑백으로 바꾼 뒤 대비를 높인다
+ *   ③ 잘라 낸 부분은 '글자 덩어리 하나'(PSM 6)로 읽는다
+ *   ④ 신뢰도가 낮으면 글자만 남기는 이진화(적응형 임계값)로 한 번 더 읽고
+ *      신뢰도가 높은 쪽을 쓴다
+ *   ⑤ 신뢰도가 낮거나 읽은 글자에 '원재료명'이 없으면 '안전' 대신 '확인 필요'로
+ *      보여 준다(큰 글씨만 읽고 성분표를 놓친 경우를 막기 위해)
  * ------------------------------------------------------- */
 
 let ocrWorker = null;
+let cropImage = null;      // 올린 사진(원본 크기)
+let cropRect = null;       // 고른 영역 {x, y, w, h} (원본 사진 픽셀 기준)
+let cropScale = 1;         // 화면에 그린 크기 / 원본 크기
+let dragStart = null;
+let lastOcr = null;        // 마지막으로 읽은 결과 {text, confidence, header}
+
+const OCR_RETRY_BELOW = 70;     // 이보다 낮으면 이진화해서 한 번 더 읽기
+const OCR_LOW_CONFIDENCE = 60;  // 이보다 낮으면 '안전'으로 보여 주지 않기
+const INGREDIENT_HEADER = /원\s*[재제]\s*[료로]/; // '원재료명'(잘못 읽힌 '원재로', '원제료'도 포함)
 
 const OCR_STATUS_TEXT = {
   "loading tesseract core": "글자 인식 엔진을 불러오는 중",
@@ -119,55 +136,235 @@ function loadImage(file) {
   });
 }
 
-// 인식률을 높이기 위해: 크기를 알맞게 맞추고 흑백으로 바꾸기
-function prepareImage(img) {
-  const longSide = Math.max(img.width, img.height);
-  const scale = Math.min(2400 / longSide, 2.5);
-  const canvas = document.createElement("canvas");
-  canvas.width = Math.round(img.width * scale);
-  canvas.height = Math.round(img.height * scale);
-  const ctx = canvas.getContext("2d");
-  ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+/* ① 영역 고르기 ------------------------------------------- */
 
-  const image = ctx.getImageData(0, 0, canvas.width, canvas.height);
-  const pixels = image.data; // [R, G, B, A, R, G, B, A, ...]
-  for (let i = 0; i < pixels.length; i += 4) {
-    const gray = 0.299 * pixels[i] + 0.587 * pixels[i + 1] + 0.114 * pixels[i + 2];
-    pixels[i] = pixels[i + 1] = pixels[i + 2] = gray;
+function drawCrop() {
+  const canvas = $("#crop-canvas");
+  const ctx = canvas.getContext("2d");
+  const w = canvas.width, h = canvas.height;
+  ctx.drawImage(cropImage, 0, 0, w, h);
+  if (!cropRect) return;
+  const r = {
+    x: cropRect.x * cropScale, y: cropRect.y * cropScale,
+    w: cropRect.w * cropScale, h: cropRect.h * cropScale,
+  };
+  ctx.fillStyle = "rgba(0, 0, 0, 0.45)"; // 고르지 않은 곳은 어둡게
+  ctx.fillRect(0, 0, w, r.y);
+  ctx.fillRect(0, r.y + r.h, w, h - r.y - r.h);
+  ctx.fillRect(0, r.y, r.x, r.h);
+  ctx.fillRect(r.x + r.w, r.y, w - r.x - r.w, r.h);
+  ctx.strokeStyle = "#2f6fed";
+  ctx.lineWidth = Math.max(2, w / 300);
+  ctx.strokeRect(r.x, r.y, r.w, r.h);
+}
+
+function showCrop(img) {
+  cropImage = img;
+  cropRect = null;
+  const box = $("#crop-box");
+  box.hidden = false;
+  const canvas = $("#crop-canvas");
+  const shownWidth = Math.min(box.clientWidth || 600, 900);
+  const ratio = window.devicePixelRatio || 1;
+  cropScale = Math.min(1, (shownWidth * ratio) / img.width);
+  canvas.width = Math.round(img.width * cropScale);
+  canvas.height = Math.round(img.height * cropScale);
+  drawCrop();
+  $("#crop-append").hidden = true;
+}
+
+function pointerToImage(event) {
+  const canvas = $("#crop-canvas");
+  const rect = canvas.getBoundingClientRect();
+  const x = ((event.clientX - rect.left) / rect.width) * canvas.width / cropScale;
+  const y = ((event.clientY - rect.top) / rect.height) * canvas.height / cropScale;
+  return {
+    x: Math.max(0, Math.min(cropImage.width, x)),
+    y: Math.max(0, Math.min(cropImage.height, y)),
+  };
+}
+
+function onCropDown(event) {
+  if (!cropImage) return;
+  event.preventDefault();
+  $("#crop-canvas").setPointerCapture(event.pointerId);
+  dragStart = pointerToImage(event);
+  cropRect = null;
+  drawCrop();
+}
+
+function onCropMove(event) {
+  if (!dragStart) return;
+  event.preventDefault();
+  const p = pointerToImage(event);
+  cropRect = {
+    x: Math.min(dragStart.x, p.x), y: Math.min(dragStart.y, p.y),
+    w: Math.abs(p.x - dragStart.x), h: Math.abs(p.y - dragStart.y),
+  };
+  drawCrop();
+}
+
+function onCropUp() {
+  if (!dragStart) return;
+  dragStart = null;
+  // 너무 작게 고르면(실수로 톡 친 경우) 고르지 않은 것으로 본다
+  if (cropRect && (cropRect.w < 20 || cropRect.h < 20)) cropRect = null;
+  drawCrop();
+}
+
+/* ②~④ 전처리와 글자 인식 ----------------------------------- */
+
+// 고른 부분을 잘라 글자 폭에 맞게 키우고, 흑백 + 대비 높이기
+function prepareCrop(img, rect) {
+  const scale = Math.min(1600 / rect.w, 3, 2400 / Math.max(rect.w, rect.h));
+  const w = Math.max(1, Math.round(rect.w * scale));
+  const h = Math.max(1, Math.round(rect.h * scale));
+  const pad = 30; // 가장자리에 흰 여백을 두면 글자 인식이 안정적이다
+  const canvas = document.createElement("canvas");
+  canvas.width = w + pad * 2;
+  canvas.height = h + pad * 2;
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = "high";
+  ctx.drawImage(img, rect.x, rect.y, rect.w, rect.h, pad, pad, w, h);
+
+  const image = ctx.getImageData(pad, pad, w, h);
+  const px = image.data; // [R, G, B, A, R, G, B, A, ...]
+  const gray = new Uint8ClampedArray(w * h);
+  const hist = new Uint32Array(256);
+  for (let i = 0, j = 0; i < px.length; i += 4, j++) {
+    const v = Math.round(0.299 * px[i] + 0.587 * px[i + 1] + 0.114 * px[i + 2]);
+    gray[j] = v;
+    hist[v]++;
   }
-  ctx.putImageData(image, 0, 0);
+  // 가장 어두운 1%와 가장 밝은 1%를 기준으로 밝기 범위를 넓힌다(대비 높이기)
+  const n = w * h;
+  let lo = 0, hi = 255, acc = 0;
+  for (let v = 0; v < 256; v++) { acc += hist[v]; if (acc >= n * 0.01) { lo = v; break; } }
+  acc = 0;
+  for (let v = 255; v >= 0; v--) { acc += hist[v]; if (acc >= n * 0.01) { hi = v; break; } }
+  const span = Math.max(1, hi - lo);
+  for (let i = 0, j = 0; i < px.length; i += 4, j++) {
+    const v = Math.max(0, Math.min(255, ((gray[j] - lo) * 255) / span));
+    px[i] = px[i + 1] = px[i + 2] = v;
+  }
+  ctx.putImageData(image, pad, pad);
   return canvas;
+}
+
+// 적응형 임계값(주변 평균보다 15% 어두우면 글자): 조명이 고르지 않거나 반사가 있을 때 쓴다
+function binarize(source) {
+  const w = source.width, h = source.height;
+  const px = source.getContext("2d", { willReadFrequently: true }).getImageData(0, 0, w, h).data;
+  const W1 = w + 1;
+  const integral = new Float64Array(W1 * (h + 1));
+  for (let y = 1; y <= h; y++) {
+    let row = 0;
+    for (let x = 1; x <= w; x++) {
+      row += px[((y - 1) * w + (x - 1)) * 4];
+      integral[y * W1 + x] = integral[(y - 1) * W1 + x] + row;
+    }
+  }
+  const size = Math.max(15, Math.floor(w / 16)) | 1;
+  const r = size >> 1;
+  const out = document.createElement("canvas");
+  out.width = w;
+  out.height = h;
+  const octx = out.getContext("2d");
+  const result = octx.createImageData(w, h);
+  const o = result.data;
+  let black = 0;
+  for (let y = 0; y < h; y++) {
+    const y0 = Math.max(0, y - r), y1 = Math.min(h, y + r + 1);
+    for (let x = 0; x < w; x++) {
+      const x0 = Math.max(0, x - r), x1 = Math.min(w, x + r + 1);
+      const area = (y1 - y0) * (x1 - x0);
+      const sum = integral[y1 * W1 + x1] - integral[y0 * W1 + x1] - integral[y1 * W1 + x0] + integral[y0 * W1 + x0];
+      const k = (y * w + x) * 4;
+      const v = px[k] * area <= sum * 0.85 ? 0 : 255;
+      if (v === 0) black++;
+      o[k] = o[k + 1] = o[k + 2] = v;
+      o[k + 3] = 255;
+    }
+  }
+  // 밝은 글씨가 어두운 바탕에 있으면 뒤집어서 검은 글씨로 만든다
+  if (black > (w * h) / 2) {
+    for (let k = 0; k < o.length; k += 4) o[k] = o[k + 1] = o[k + 2] = 255 - o[k];
+  }
+  octx.putImageData(result, 0, 0);
+  return out;
+}
+
+async function recognize(worker, canvas, psm) {
+  await worker.setParameters({ tessedit_pageseg_mode: String(psm), preserve_interword_spaces: "1" });
+  const { data } = await worker.recognize(canvas);
+  return { text: data.text.trim(), confidence: Math.round(data.confidence || 0) };
 }
 
 function setOcrBusy(busy) {
   $("#ocr-box").hidden = false;
   $("#ocr-bar").hidden = !busy;
   $("#check-btn").disabled = busy;
+  $("#crop-read").disabled = busy;
+  $("#crop-append").disabled = busy;
   $("#photo-label").classList.toggle("is-disabled", busy);
 }
 
 async function onPhotoSelected(event) {
   const file = event.target.files[0];
+  event.target.value = ""; // 같은 사진을 다시 골라도 동작하도록
   if (!file) return;
-
-  const preview = $("#photo-preview");
-  preview.src = URL.createObjectURL(file);
-  preview.hidden = false;
-
-  if (typeof Tesseract === "undefined") {
+  try {
+    showCrop(await loadImage(file));
     $("#ocr-box").hidden = false;
+    $("#ocr-bar").hidden = true;
+    $("#ocr-status").textContent = "원재료명부터 알레르기 표시('○○ 함유')까지 손가락으로 끌어서 고른 뒤 '고른 부분 읽기'를 눌러 주세요.";
+    $("#crop-box").scrollIntoView({ behavior: "smooth", block: "start" });
+  } catch (error) {
+    console.error(error);
+    $("#ocr-box").hidden = false;
+    $("#ocr-status").textContent = "사진을 열지 못했어요. 다른 사진을 골라 주세요.";
+  }
+}
+
+async function readCrop(append) {
+  if (!cropImage) return;
+  if (typeof Tesseract === "undefined") {
     $("#ocr-status").textContent = "글자 인식 기능을 불러오지 못했어요. 인터넷 연결을 확인하거나 성분표를 직접 입력해 주세요.";
     return;
   }
-
+  const whole = !cropRect;
+  const rect = cropRect || { x: 0, y: 0, w: cropImage.width, h: cropImage.height };
   setOcrBusy(true);
   try {
-    const img = await loadImage(file);
-    const canvas = prepareImage(img);
     const worker = await getOcrWorker();
-    const { data } = await worker.recognize(canvas);
-    $("#label-text").value = data.text.trim();
-    $("#ocr-status").textContent = "다 읽었어요. 잘못 읽힌 글자가 있으면 고친 뒤 '검사하기'를 다시 눌러 주세요.";
+    const base = prepareCrop(cropImage, rect);
+    const psm = whole ? 3 : 6; // 사진 전체는 자동 배치 분석, 고른 부분은 글자 덩어리 하나
+    let best = await recognize(worker, base, psm);
+    let used = base;
+    if (best.confidence < OCR_RETRY_BELOW) {
+      const bin = binarize(base);
+      const second = await recognize(worker, bin, psm);
+      if (second.confidence > best.confidence) { best = second; used = bin; }
+    }
+    $("#ocr-input").src = used.toDataURL("image/png");
+    $("#ocr-input-box").hidden = false;
+
+    const textarea = $("#label-text");
+    textarea.value = append && textarea.value.trim() ? `${textarea.value.trim()}\n${best.text}` : best.text;
+    lastOcr = { text: textarea.value.trim(), confidence: best.confidence };
+    lastOcr.header = INGREDIENT_HEADER.test(lastOcr.text);
+    $("#crop-append").hidden = false;
+
+    if (!lastOcr.header) {
+      $("#ocr-status").textContent = `읽은 글자에 '원재료명'이 없어요(신뢰도 ${best.confidence}점). 성분표를 다 읽었는지 알 수 없으니, 원재료명부터 알레르기 표시까지 끌어서 고른 뒤 다시 읽어 주세요.`;
+    } else if (best.confidence < OCR_LOW_CONFIDENCE) {
+      $("#ocr-status").textContent = `글자를 제대로 읽지 못한 것 같아요(신뢰도 ${best.confidence}점). ${whole ? "원재료명 부분만 끌어서 고른 뒤 다시 읽거나, " : "더 밝고 가까이에서 다시 찍거나, "}아래 글자를 직접 고쳐 주세요.`;
+    } else {
+      $("#ocr-status").textContent = `다 읽었어요(신뢰도 ${best.confidence}점). 잘못 읽힌 글자가 있으면 고친 뒤 '검사하기'를 다시 눌러 주세요. 알레르기 표시가 떨어진 곳에 있으면 그 부분을 골라 '이어서 읽기'를 누르세요.`;
+    }
     runAnalysis();
   } catch (error) {
     console.error(error);
@@ -175,7 +372,6 @@ async function onPhotoSelected(event) {
     $("#ocr-status").textContent = "글자를 읽지 못했어요. 더 밝고 가까이에서 다시 찍거나, 성분표를 직접 입력해 주세요.";
   } finally {
     setOcrBusy(false);
-    event.target.value = ""; // 같은 사진을 다시 골라도 동작하도록
   }
 }
 
@@ -563,7 +759,20 @@ function runAnalysis() {
   if (settings.allergens.length === 0 && parseCustomWords(settings.custom).length === 0) {
     return showMessage("검사할 알레르기를 하나 이상 골라 주세요.");
   }
-  renderResult(text, analyze(text, settings), settings);
+  const result = analyze(text, settings);
+  // ⑤ 사진에서 읽은 글자를 고치지 않았고 신뢰도가 낮으면 '안전'으로 보여 주지 않는다
+  const ocrWeak = lastOcr && text === lastOcr.text && (!lastOcr.header || lastOcr.confidence < OCR_LOW_CONFIDENCE);
+  if (ocrWeak) {
+    result.findings.unshift({
+      level: "check", word: "사진 글자 인식", groupId: "_ocr", groupName: "판정 전체",
+      start: -1, end: -1, contact: false,
+      reason: !lastOcr.header
+        ? "사진에서 읽은 글자에 '원재료명'이 없어서 성분표를 다 읽었는지 알 수 없어요. 원재료명부터 알레르기 표시까지 골라 다시 읽거나, 성분표 글자를 직접 넣은 뒤 다시 검사해 주세요."
+        : `사진에서 읽은 글자의 신뢰도가 ${lastOcr.confidence}점으로 낮아서, 성분명을 잘못 읽었거나 놓쳤을 수 있어요. 원재료명 부분만 골라 다시 읽거나 잘못 읽힌 글자를 고친 뒤 다시 검사해 주세요.`,
+    });
+    if (result.verdict === "safe") result.verdict = "check";
+  }
+  renderResult(text, result, settings);
 }
 
 /* ---------------------------------------------------------
@@ -574,6 +783,14 @@ function init() {
   renderAllergenChoices(loadSettings());
   $("#custom-words").addEventListener("input", onSettingsChange);
   $("#photo-input").addEventListener("change", onPhotoSelected);
+  const crop = $("#crop-canvas");
+  crop.addEventListener("pointerdown", onCropDown);
+  crop.addEventListener("pointermove", onCropMove);
+  crop.addEventListener("pointerup", onCropUp);
+  crop.addEventListener("pointercancel", onCropUp);
+  $("#crop-read").addEventListener("click", () => readCrop(false));
+  $("#crop-append").addEventListener("click", () => readCrop(true));
+  $("#crop-clear").addEventListener("click", () => { cropRect = null; drawCrop(); });
   $("#check-btn").addEventListener("click", runAnalysis);
   $("#sample-btn").addEventListener("click", () => {
     $("#label-text").value = SAMPLE_TEXT;

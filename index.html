@@ -100,8 +100,14 @@
     .btn-wide { width: 100%; margin-top: 14px; padding: 13px; }
     .btn[disabled], .btn.is-disabled { opacity: 0.5; pointer-events: none; }
     .photo-row { display: flex; gap: 8px; flex-wrap: wrap; }
-    #photo-preview { display: block; margin-top: 12px; max-width: 100%; max-height: 220px; border-radius: 10px; border: 1px solid var(--line); }
-    #photo-preview[hidden] { display: none; }
+    #crop-box { margin-top: 12px; }
+    #crop-box[hidden], #ocr-input-box[hidden] { display: none; }
+    #crop-canvas { display: block; width: 100%; height: auto; border-radius: 10px; border: 1px solid var(--line); touch-action: none; cursor: crosshair; }
+    .crop-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+    .crop-actions .btn[hidden] { display: none; }
+    #ocr-input-box { margin-top: 10px; }
+    #ocr-input-box summary { cursor: pointer; font-size: 0.85rem; color: var(--muted); }
+    #ocr-input { display: block; margin-top: 8px; max-width: 100%; border-radius: 8px; border: 1px solid var(--line); background: #fff; }
     progress { width: 100%; margin-top: 12px; accent-color: var(--primary); }
     .hint { font-size: 0.85rem; color: var(--muted); margin: 6px 0 0; }
 
@@ -165,13 +171,26 @@
         <button id="sample-btn" class="btn btn-ghost" type="button">예시 넣기</button>
       </div>
       <p class="hint">원재료명과 알레르기 표시란('○○ 함유')이 함께 나오게 찍어 주세요. 우유처럼 표시 의무가 있는 성분은 표시란에만 적혀 있기도 해요.</p>
-      <img id="photo-preview" alt="올린 성분표 사진" hidden>
+      <div id="crop-box" hidden>
+        <canvas id="crop-canvas" aria-label="올린 성분표 사진. 끌어서 읽을 부분을 고르세요"></canvas>
+        <div class="crop-actions">
+          <button id="crop-read" class="btn btn-primary" type="button">고른 부분 읽기</button>
+          <button id="crop-append" class="btn btn-ghost" type="button" hidden>이어서 읽기</button>
+          <button id="crop-clear" class="btn btn-ghost" type="button">다시 고르기</button>
+        </div>
+        <p class="hint">고르지 않고 누르면 사진 전체를 읽는데, 그러면 포장지 그림이나 바코드까지 읽어서 잘 틀려요.</p>
+      </div>
       <div id="ocr-box" hidden>
         <progress id="ocr-bar" max="100" value="0"></progress>
         <p id="ocr-status" class="hint"></p>
+        <details id="ocr-input-box" hidden>
+          <summary>글자 인식에 넣은 사진 보기</summary>
+          <img id="ocr-input" alt="잘라서 흑백으로 바꾼 사진">
+        </details>
       </div>
 
       <label class="field-label" for="label-text">성분표 글자 (직접 입력하거나 고칠 수 있어요)</label>
+      <p class="hint">사진 인식이 잘 안 되면 휴대폰 카메라의 글자 인식(아이폰 '텍스트 인식 표시', 안드로이드 구글 렌즈)으로 원재료명을 복사해 붙여 넣어도 돼요.</p>
       <textarea id="label-text" placeholder="원재료명: 밀가루, 설탕, 탈지분유, ..."></textarea>
       <button id="check-btn" class="btn btn-primary btn-wide" type="button">검사하기</button>
     </section>
