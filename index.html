@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>알레르기 성분 스캐너</title>
+  <meta name="description" content="성분표를 찍으면 알레르기 성분과 판단 근거를 보여 주는 서비스">
+  <style>
+    :root {
+      --bg: #f4f5f7;
+      --card: #ffffff;
+      --text: #1d2129;
+      --muted: #687080;
+      --line: #e3e6ea;
+      --primary: #2f6fed;
+      --primary-text: #ffffff;
+      --danger: #d93025;
+      --danger-bg: #fdecea;
+      --check: #b26a00;
+      --check-bg: #fff3dc;
+      --safe: #188038;
+      --safe-bg: #e6f4ea;
+      --info: #5f6b7a;
+      --info-bg: #eceff3;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #111418;
+        --card: #1b1f24;
+        --text: #e8eaed;
+        --muted: #9aa0a6;
+        --line: #2d333b;
+        --primary: #6d9bff;
+        --primary-text: #0b1220;
+        --danger: #ff7b72;
+        --danger-bg: #3a1d1b;
+        --check: #f2b552;
+        --check-bg: #3a2c12;
+        --safe: #6fcf8b;
+        --safe-bg: #16301f;
+        --info: #aab4c0;
+        --info-bg: #232a33;
+      }
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans KR", sans-serif;
+      line-height: 1.55;
+      word-break: keep-all;
+    }
+    .app-header, main { max-width: 560px; margin: 0 auto; padding-left: 16px; padding-right: 16px; }
+    .app-header { padding-top: 28px; }
+    .app-header h1 { margin: 0; font-size: 1.5rem; letter-spacing: -0.02em; }
+    .app-header p { margin: 4px 0 0; color: var(--muted); }
+    main { padding-bottom: 40px; }
+
+    .card {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      padding: 18px;
+      margin-top: 14px;
+    }
+    h2 { font-size: 1.05rem; margin: 0 0 12px; display: flex; align-items: center; gap: 8px; }
+    h3 { font-size: 0.95rem; margin: 20px 0 4px; }
+    .step {
+      display: inline-grid; place-items: center;
+      width: 24px; height: 24px; border-radius: 50%;
+      background: var(--primary); color: var(--primary-text); font-size: 0.8rem;
+    }
+
+    .chips { display: flex; flex-wrap: wrap; gap: 8px; }
+    .chip {
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 8px 14px; border: 1px solid var(--line); border-radius: 999px;
+      cursor: pointer; user-select: none;
+    }
+    .chip:has(input:checked) { border-color: var(--primary); background: color-mix(in srgb, var(--primary) 12%, transparent); }
+    .chip input { accent-color: var(--primary); margin: 0; }
+
+    .field-label { display: block; font-size: 0.85rem; color: var(--muted); margin: 14px 0 6px; }
+    input[type="text"], textarea {
+      width: 100%; font: inherit; color: inherit; background: transparent;
+      border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px;
+    }
+    input[type="text"]:focus, textarea:focus { outline: 2px solid var(--primary); outline-offset: -1px; }
+    textarea { resize: vertical; min-height: 140px; }
+
+    .btn {
+      display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+      font: inherit; font-weight: 600; padding: 10px 16px; border-radius: 10px;
+      border: 1px solid transparent; cursor: pointer;
+    }
+    .btn-primary { background: var(--primary); color: var(--primary-text); }
+    .btn-ghost { background: transparent; border-color: var(--line); color: var(--text); }
+    .btn-wide { width: 100%; margin-top: 14px; padding: 13px; }
+    .btn[disabled], .btn.is-disabled { opacity: 0.5; pointer-events: none; }
+    .photo-row { display: flex; gap: 8px; flex-wrap: wrap; }
+    #photo-preview { display: block; margin-top: 12px; max-width: 100%; max-height: 220px; border-radius: 10px; border: 1px solid var(--line); }
+    #photo-preview[hidden] { display: none; }
+    progress { width: 100%; margin-top: 12px; accent-color: var(--primary); }
+    .hint { font-size: 0.85rem; color: var(--muted); margin: 6px 0 0; }
+
+    /* 결과 */
+    .verdict { display: flex; gap: 14px; align-items: center; padding: 16px; border-radius: 12px; }
+    .verdict-icon {
+      flex: none; width: 48px; height: 48px; border-radius: 50%;
+      display: grid; place-items: center; font-size: 1.5rem; font-weight: 800; color: var(--card);
+    }
+    .verdict.danger { background: var(--danger-bg); }
+    .verdict.danger .verdict-icon { background: var(--danger); }
+    .verdict.check { background: var(--check-bg); }
+    .verdict.check .verdict-icon { background: var(--check); }
+    .verdict.safe { background: var(--safe-bg); }
+    .verdict.safe .verdict-icon { background: var(--safe); }
+    .verdict-title { font-size: 1.2rem; font-weight: 800; margin: 0; }
+    .verdict-desc { margin: 2px 0 0; font-size: 0.9rem; }
+
+    .findings { list-style: none; padding: 0; margin: 0; }
+    .finding { border-top: 1px solid var(--line); padding: 12px 0; }
+    .finding-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+    .badge { font-size: 0.75rem; font-weight: 700; padding: 2px 8px; border-radius: 999px; }
+    .badge.danger { background: var(--danger-bg); color: var(--danger); }
+    .badge.check { background: var(--check-bg); color: var(--check); }
+    .badge.info { background: var(--info-bg); color: var(--info); }
+    .finding-word { font-weight: 700; }
+    .finding-count, .finding-group { color: var(--muted); font-size: 0.85rem; }
+    .finding-reason { margin: 4px 0 0; font-size: 0.9rem; }
+
+    .source-text {
+      white-space: pre-wrap; word-break: break-all;
+      background: var(--bg); border-radius: 10px; padding: 12px; font-size: 0.9rem; margin-top: 8px;
+    }
+    mark { border-radius: 4px; padding: 0 2px; color: inherit; }
+    .mark-danger { background: var(--danger-bg); box-shadow: inset 0 -2px 0 var(--danger); }
+    .mark-check { background: var(--check-bg); box-shadow: inset 0 -2px 0 var(--check); }
+    .mark-info { background: var(--info-bg); box-shadow: inset 0 -2px 0 var(--info); }
+    .message { margin: 0; }
+    .disclaimer { font-size: 0.8rem; color: var(--muted); margin-top: 16px; }
+  </style>
+</head>
+<body>
+  <header class="app-header">
+    <h1>알레르기 성분 스캐너</h1>
+    <p>성분표를 찍으면 <strong>왜</strong> 위험한지 근거까지 보여 줘요</p>
+  </header>
+
+  <main>
+    <section class="card">
+      <h2><span class="step">1</span>내 알레르기</h2>
+      <div id="allergen-list" class="chips"></div>
+      <label class="field-label" for="custom-words">직접 추가 (쉼표로 구분)</label>
+      <input id="custom-words" type="text" placeholder="예: 땅콩, 호두" autocomplete="off">
+    </section>
+
+    <section class="card">
+      <h2><span class="step">2</span>성분표 넣기</h2>
+      <div class="photo-row">
+        <label id="photo-label" class="btn btn-primary" for="photo-input">📷 사진 찍기 / 올리기</label>
+        <input id="photo-input" type="file" accept="image/*" hidden>
+        <button id="sample-btn" class="btn btn-ghost" type="button">예시 넣기</button>
+      </div>
+      <p class="hint">원재료명과 알레르기 표시란('○○ 함유')이 함께 나오게 찍어 주세요. 우유처럼 표시 의무가 있는 성분은 표시란에만 적혀 있기도 해요.</p>
+      <img id="photo-preview" alt="올린 성분표 사진" hidden>
+      <div id="ocr-box" hidden>
+        <progress id="ocr-bar" max="100" value="0"></progress>
+        <p id="ocr-status" class="hint"></p>
+      </div>
+
+      <label class="field-label" for="label-text">성분표 글자 (직접 입력하거나 고칠 수 있어요)</label>
+      <textarea id="label-text" placeholder="원재료명: 밀가루, 설탕, 탈지분유, ..."></textarea>
+      <button id="check-btn" class="btn btn-primary btn-wide" type="button">검사하기</button>
+    </section>
+
+    <section id="result" class="card" hidden aria-live="polite"></section>
+
+    <p class="disclaimer">
+      이 결과는 참고용이에요. 사전에 없는 성분명이나 사진에서 잘못 읽힌 글자는 찾지 못할 수 있어요.
+      증상이 심하다면 보호자·의사와 꼭 확인하세요.
+    </p>
+  </main>
+
+  <!-- 사진 속 글자 인식(OCR) 라이브러리 -->
+  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js"></script>
+  <!-- 알레르기 성분 사전 (데이터) -->
+  <script src="dictionary.js"></script>
+  <!-- 분석·화면 동작 -->
+  <script src="app.js"></script>
+</body>
+</html>
